@@ -1,11 +1,11 @@
 import 'dotenv/config';
 import { Pool } from 'pg';
 
-/**
- * No pgvector; store embedding as BYTEA.
- */
 export async function ensureDb(poolExternal) {
-  const pool = poolExternal || new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
+  const pool = poolExternal || new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: { rejectUnauthorized: false }
+  });
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -53,7 +53,10 @@ export async function ensureDb(poolExternal) {
 }
 
 if (process.argv[1] && process.argv[1].includes('db_init.js')) {
-  const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
+  const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: { rejectUnauthorized: false }
+  });
   ensureDb(pool)
     .then(() => { console.log('DB ready'); process.exit(0); })
     .catch(err => { console.error(err); process.exit(1); });

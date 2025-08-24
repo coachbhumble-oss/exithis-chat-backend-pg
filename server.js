@@ -14,41 +14,45 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
-
 await ensureDb(pool);
 
-// CORS allowlist
-const allowed = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
+// ---------- CORS (robust) ----------
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
 app.use(cors({
   origin: (origin, cb) => {
     if (!origin) return cb(null, true);
-    if (allowed.includes(origin)) return cb(null, true);
+    if (allowedOrigins.includes(origin)) return cb(null, true);
     cb(new Error('CORS blocked'));
-  }
+  },
+  methods: ['GET','POST','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization'],
+  maxAge: 86400
 }));
+app.use((req, res, next) => { res.setHeader('Vary','Origin'); next(); });
+app.options('*', cors());
 
-app.options('/api/chat', (_, res) => res.status(204).end());
-
+// ---------- Gate by Referer OR Origin ----------
 const refererRe = new RegExp(process.env.REFERER_REGEX || '^$', 'i');
-
-function cosine(a, b) {
-  let dot=0, na=0, nb=0;
-  for (let i=0;i<a.length;i++){ dot+=a[i]*b[i]; na+=a[i]*a[i]; nb+=b[i]*b[i]; }
-  return dot / (Math.sqrt(na)*Math.sqrt(nb) + 1e-8);
-}
-function fromBytea(buf) {
-  const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
-  return new Float32Array(ab);
-}
-function toBytea(f32) {
-  return Buffer.from(f32.buffer, f32.byteOffset, f32.byteLength);
+function allowedByOriginOrReferer(req) {
+  const referer = req.get('referer') || '';
+  const origin  = req.get('origin')  || '';
+  const refererOk = refererRe.test(referer);
+  const originOk  = allowedOrigins.includes(origin);
+  return refererOk || originOk;
 }
 
-// Chat endpoint
+// Optional: root health routes
+app.get('/', (req, res) => res.type('text/plain').send('Exithis API: OK'));
+app.get('/healthz', (req, res) => res.json({ ok: true }));
+
+// --- CHAT endpoint ---
 app.post('/api/chat', async (req, res) => {
   try {
-    const referer = req.get('referer') || '';
-    if (!refererRe.test(referer)) return res.status(403).send('Forbidden');
+    if (!allowedByOriginOrReferer(req)) return res.status(403).send('Forbidden');
 
     const { message, session_id = 'anon' } = req.body || {};
     if (!message) return res.status(400).send('Missing message');
@@ -113,7 +117,7 @@ ${context}`;
   }
 });
 
-// Ingest endpoint
+// --- INGEST endpoint ---
 app.post('/api/ingest', async (req, res) => {
   const auth = req.get('authorization') || '';
   if (!auth.startsWith('Bearer ')) return res.status(401).send('Unauthorized');
@@ -146,5 +150,19 @@ app.post('/api/ingest', async (req, res) => {
   res.json({ docId, chunks: chunks.length });
 });
 
+// ---- Local helpers ----
+function cosine(a, b) {
+  let dot=0, na=0, nb=0;
+  for (let i=0;i<a.length;i++){ dot+=a[i]*b[i]; na+=a[i]*a[i]; nb+=b[i]*b[i]; }
+  return dot / (Math.sqrt(na)*Math.sqrt(nb) + 1e-8);
+}
+function fromBytea(buf) {
+  const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+  return new Float32Array(ab);
+}
+function toBytea(f32) {
+  return Buffer.from(f32.buffer, f32.byteOffset, f32.byteLength);
+}
+
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log('Exithis PG backend (noext) on :' + port));
+app.listen(port, () => console.log('Exithis PG backend (corsfix) on :' + port));
