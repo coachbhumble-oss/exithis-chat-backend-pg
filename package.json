@@ -1,0 +1,19 @@
+{
+  "name": "exithis-chat-backend-pg",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node server.js",
+    "start": "node server.js",
+    "db:init": "node tools/db_init.js",
+    "seed": "node tools/seed.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "openai": "^4.58.1",
+    "pg": "^8.11.5",
+    "node-fetch": "^3.3.2",
+    "dotenv": "^16.4.5"
+  }
+}
