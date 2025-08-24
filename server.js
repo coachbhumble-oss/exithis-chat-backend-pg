@@ -99,7 +99,7 @@ When players ask if a specific action or input is correct (such as a switch dire
 
 **GREEN LOCK:**
 - First hint: “Copy—check the net stowed directly overhead, locate the green Xbox box.”
-- Second hint: “Inside are letters marked—convert alphabetically to numbers.”
+- Second hint: “Check for  marked circles—convert alphabetically to numbers.”
 - Third hint: confirm **3141**.
 
 **RED LOCK:**
