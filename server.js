@@ -9,10 +9,12 @@ import { ensureDb } from './tools/db_init.js';
 const app = express();
 app.use(express.json({ limit: '2mb' }));
 
-// DB pool
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+// DB pool with SSL forced
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
 
-// Ensure DB objects exist (extension/tables/indexes)
 await ensureDb(pool);
 
 // CORS allowlist
@@ -25,13 +27,24 @@ app.use(cors({
   }
 }));
 
-// Health / preflight for widget
 app.options('/api/chat', (_, res) => res.status(204).end());
 
-// Referer lock to /chat
 const refererRe = new RegExp(process.env.REFERER_REGEX || '^$', 'i');
 
-// --- CHAT (stream w/ RAG via pgvector) ---
+function cosine(a, b) {
+  let dot=0, na=0, nb=0;
+  for (let i=0;i<a.length;i++){ dot+=a[i]*b[i]; na+=a[i]*a[i]; nb+=b[i]*b[i]; }
+  return dot / (Math.sqrt(na)*Math.sqrt(nb) + 1e-8);
+}
+function fromBytea(buf) {
+  const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+  return new Float32Array(ab);
+}
+function toBytea(f32) {
+  return Buffer.from(f32.buffer, f32.byteOffset, f32.byteLength);
+}
+
+// Chat endpoint
 app.post('/api/chat', async (req, res) => {
   try {
     const referer = req.get('referer') || '';
@@ -40,24 +53,21 @@ app.post('/api/chat', async (req, res) => {
     const { message, session_id = 'anon' } = req.body || {};
     if (!message) return res.status(400).send('Missing message');
 
-    // store user turn
     await pool.query(
       'INSERT INTO chats (session_id, role, content, created_at) VALUES ($1,$2,$3,$4)',
       [session_id, 'user', message, Date.now()]
     );
 
-    // embed query
     const [qVec] = await embedTexts([message]);
 
-    // top-K via cosine distance
-    const { rows: ctxRows } = await pool.query(
-      `SELECT content
-       FROM chunks
-       ORDER BY embedding <=> $1
-       LIMIT 6`,
-      [qVec]
-    );
-    const context = ctxRows.map(r => `• ${r.content}`).join('\n');
+    const { rows: allChunks } = await pool.query('SELECT content, embedding FROM chunks');
+    const scored = allChunks.map(r => ({
+      content: r.content,
+      score: cosine(qVec, fromBytea(r.embedding))
+    }));
+    scored.sort((a,b) => b.score - a.score);
+    const top = scored.slice(0, 6);
+    const context = top.map(t => `• ${t.content}`).join('\n');
 
     const system = `You are Exithis Assistant. Be concise, friendly, and helpful.
 Use only the provided context for facts about Exithis rooms, rules, pricing, location, and hints.
@@ -103,7 +113,7 @@ ${context}`;
   }
 });
 
-// --- INGEST (add/update text) ---
+// Ingest endpoint
 app.post('/api/ingest', async (req, res) => {
   const auth = req.get('authorization') || '';
   if (!auth.startsWith('Bearer ')) return res.status(401).send('Unauthorized');
@@ -111,25 +121,22 @@ app.post('/api/ingest', async (req, res) => {
   const { source = 'manual', url = null, title = null, text } = req.body || {};
   if (!text || text.length < 20) return res.status(400).send('text too short');
 
-  // chunk + embed server-side
   const { chunk } = await import('./src/chunking.js');
   const chunks = chunk(text);
-  const vecs = await embedTexts(chunks); // 3072-d vectors
+  const vecs = await embedTexts(chunks);
 
-  // insert doc
   const { rows: docRows } = await pool.query(
     'INSERT INTO docs (source, url, title, text, updated_at) VALUES ($1,$2,$3,$4,$5) RETURNING id',
     [source, url, title, text, Date.now()]
   );
   const docId = docRows[0].id;
 
-  // batch insert chunks
   const qs = [];
   const params = [];
   let p = 1;
-  for (let i=0; i<chunks.length; i++) {
+  for (let i=0;i<chunks.length;i++) {
     qs.push(`($${p++}, $${p++}, $${p++}, $${p++})`);
-    params.push(docId, i, chunks[i], vecs[i]);
+    params.push(docId, i, chunks[i], toBytea(vecs[i]));
   }
   await pool.query(
     `INSERT INTO chunks (doc_id, chunk_index, content, embedding) VALUES ${qs.join(',')}`,
@@ -140,4 +147,4 @@ app.post('/api/ingest', async (req, res) => {
 });
 
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log('Exithis PG backend on :' + port));
+app.listen(port, () => console.log('Exithis PG backend (noext) on :' + port));

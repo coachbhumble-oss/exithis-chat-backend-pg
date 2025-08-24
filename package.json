@@ -1,5 +1,5 @@
 {
-  "name": "exithis-chat-backend-pg",
+  "name": "exithis-chat-backend-pg-noext",
   "private": true,
   "type": "module",
   "scripts": {
