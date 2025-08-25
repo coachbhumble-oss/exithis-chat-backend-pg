@@ -1,79 +1,13 @@
-import 'dotenv/config';
-import express from 'express';
-import cors from 'cors';
-import { OpenAI } from 'openai';
-import { Pool } from 'pg';
-import { embedTexts } from './src/embeddings.js';
-import { ensureDb } from './tools/db_init.js';
+// ===== Room-specific instructions (fill these with your Custom GPT instructions) =====
+const roomPrompts = {
+  "global": `
+You are the Exithis Assistant.
+Handle general questions (booking, policies, location, safety).
+Be concise, friendly, and reassuring.
+`,
 
-const app = express();
-app.use(express.json({ limit: '2mb' }));
-
-// DB pool with SSL forced
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-});
-await ensureDb(pool);
-
-// ---------- CORS (robust) ----------
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean);
-
-app.use(cors({
-  origin: (origin, cb) => {
-    if (!origin) return cb(null, true);
-    if (allowedOrigins.includes(origin)) return cb(null, true);
-    cb(new Error('CORS blocked'));
-  },
-  methods: ['GET','POST','OPTIONS'],
-  allowedHeaders: ['Content-Type','Authorization'],
-  maxAge: 86400
-}));
-app.use((req, res, next) => { res.setHeader('Vary','Origin'); next(); });
-app.options('*', cors());
-
-// ---------- Gate by Referer OR Origin ----------
-const refererRe = new RegExp(process.env.REFERER_REGEX || '^$', 'i');
-function allowedByOriginOrReferer(req) {
-  const referer = req.get('referer') || '';
-  const origin  = req.get('origin')  || '';
-  const refererOk = refererRe.test(referer);
-  const originOk  = allowedOrigins.includes(origin);
-  return refererOk || originOk;
-}
-
-// Optional: root health routes
-app.get('/', (req, res) => res.type('text/plain').send('Exithis API: OK'));
-app.get('/healthz', (req, res) => res.json({ ok: true }));
-
-// --- CHAT endpoint ---
-app.post('/api/chat', async (req, res) => {
-  try {
-    if (!allowedByOriginOrReferer(req)) return res.status(403).send('Forbidden');
-
-    const { message, session_id = 'anon' } = req.body || {};
-    if (!message) return res.status(400).send('Missing message');
-
-    await pool.query(
-      'INSERT INTO chats (session_id, role, content, created_at) VALUES ($1,$2,$3,$4)',
-      [session_id, 'user', message, Date.now()]
-    );
-
-    const [qVec] = await embedTexts([message]);
-
-    const { rows: allChunks } = await pool.query('SELECT content, embedding FROM chunks');
-    const scored = allChunks.map(r => ({
-      content: r.content,
-      score: cosine(qVec, fromBytea(r.embedding))
-    }));
-    scored.sort((a,b) => b.score - a.score);
-    const top = scored.slice(0, 6);
-    const context = top.map(t => `• ${t.content}`).join('\n');
-
-    const system = `You are You are Tower Control, an urgent but composed air traffic controller guiding players through *Crash Landing*, an escape room aboard a failing airplane. The pilot has ejected. Players must solve puzzles to regain autopilot and land safely.
+  "chat": `
+You are You are Tower Control, an urgent but composed air traffic controller guiding players through *Crash Landing*, an escape room aboard a failing airplane. The pilot has ejected. Players must solve puzzles to regain autopilot and land safely.
 
 Use clipped, aviation-style radio speech (e.g., “copy,” “confirm,” “override acknowledged”). Keep all replies under two sentences. Begin with subtle hints; escalate only if players are stuck or request help multiple times. Never provide full solutions without justification, and always frame them as team efforts. Stay in character—do not discuss anything unrelated to the mission.
 
@@ -172,6 +106,139 @@ Reminders:
 - Vary hint phrasing.
 - Maintain urgency but enable completion.
 - Mention aircraft details only if part of puzzle.
+`,
+
+  "assassins-hideout": `
+You are the Assassin’s Hideout room assistant.
+[PASTE the Assassin’s Hideout Custom GPT instructions here.]
+`,
+
+  "spaceship": `
+You are the Spaceship room assistant.
+[PASTE the Spaceship Custom GPT instructions here.]
+`,
+
+  "museum-heist": `
+You are the Museum Heist room assistant.
+[PASTE the Museum Heist Custom GPT instructions here.]
+`,
+
+  "time-warp": `
+You are the Time Warp room assistant.
+[PASTE the Time Warp Custom GPT instructions here.]
+`,
+
+  "ghost-mansion": `
+You are the Ghost Mansion room assistant.
+[PASTE the Ghost Mansion Custom GPT instructions here.]
+`
+};
+
+// Optional: common guardrails appended to every room
+const COMMON_RULES = `
+- Give stepwise hints. Do NOT reveal final codes/solutions unless the guest explicitly asks for a "full solution".
+- If the policy or price isn’t in context, say so and offer booking/contact options.
+- Keep answers short and friendly; avoid spoilers unless asked.
+- If safety is mentioned, prioritize safety guidance first.
+`;
+import 'dotenv/config';
+import express from 'express';
+import cors from 'cors';
+import { OpenAI } from 'openai';
+import { Pool } from 'pg';
+import { embedTexts } from './src/embeddings.js';
+import { ensureDb } from './tools/db_init.js';
+
+const app = express();
+app.use(express.json({ limit: '2mb' }));
+
+// DB pool with SSL forced
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
+await ensureDb(pool);
+
+// ---------- CORS (robust) ----------
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
+app.use(cors({
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true);
+    if (allowedOrigins.includes(origin)) return cb(null, true);
+    cb(new Error('CORS blocked'));
+  },
+  methods: ['GET','POST','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization'],
+  maxAge: 86400
+}));
+app.use((req, res, next) => { res.setHeader('Vary','Origin'); next(); });
+app.options('*', cors());
+
+// ---------- Gate by Referer OR Origin ----------
+const refererRe = new RegExp(process.env.REFERER_REGEX || '^$', 'i');
+function allowedByOriginOrReferer(req) {
+  const referer = req.get('referer') || '';
+  const origin  = req.get('origin')  || '';
+  const refererOk = refererRe.test(referer);
+  const originOk  = allowedOrigins.includes(origin);
+  return refererOk || originOk;
+}
+
+// Optional: root health routes
+app.get('/', (req, res) => res.type('text/plain').send('Exithis API: OK'));
+app.get('/healthz', (req, res) => res.json({ ok: true }));
+
+// --- CHAT endpoint ---
+app.post('/api/chat', async (req, res) => {
+  try {
+    if (!allowedByOriginOrReferer(req)) return res.status(403).send('Forbidden');
+
+    const { message, session_id = 'anon' } = req.body || {};
+    if (!message) return res.status(400).send('Missing message');
+
+    await pool.query(
+      'INSERT INTO chats (session_id, role, content, created_at) VALUES ($1,$2,$3,$4)',
+      [session_id, 'user', message, Date.now()]
+    );
+
+    const [qVec] = await embedTexts([message]);
+
+    const { rows: allChunks } = await pool.query('SELECT content, embedding FROM chunks');
+    const scored = allChunks.map(r => ({
+      content: r.content,
+      score: cosine(qVec, fromBytea(r.embedding))
+    }));
+    scored.sort((a,b) => b.score - a.score);
+    const top = scored.slice(0, 6);
+    const context = top.map(t => `• ${t.content}`).join('\n');
+
+    const system = // room comes from the frontend body: { room: 'pink-beard' } etc.
+const roomSlug = (room || 'global').toLowerCase();
+const baseInstructions = (roomPrompts[roomSlug] || roomPrompts['global']).trim();
+
+// Cosmetic title like "Pink Beard" from "pink-beard"
+const roomTitle = roomSlug === 'global'
+  ? 'Exithis'
+  : roomSlug.split('-').map(s => s.charAt(0).toUpperCase() + s.slice(1)).join(' ');
+
+// Final system prompt sent to the model
+const system = `
+${baseInstructions}
+
+${COMMON_RULES}
+
+Room: ${roomTitle}
+
+Use ONLY the provided context for facts (room details, hints, policies, location, pricing). If the needed info isn’t found in context, be transparent and suggest booking/contact.
+When giving hints, start gentle and escalate gradually.
+
+Context:
+${context}
+`.trim();
 Context:
 ${context}`;
 
