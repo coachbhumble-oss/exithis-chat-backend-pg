@@ -9,7 +9,6 @@ import { embedTexts } from './src/embeddings.js';
 import { ensureDb } from './tools/db_init.js';
 
 // ===== 1) Room-specific instructions =====
-// Fill these with your Custom GPT instructions for each room.
 // Keys MUST match the ROOM_SLUG you send from each Squarespace page.
 const roomPrompts = {
   "global": `
@@ -76,7 +75,7 @@ You are the Ghost Mansion room assistant.
 [PASTE the Ghost Mansion Custom GPT instructions here.]
 `,
 
-  // Example from your “Tower Control” style (rename slug to match your page if needed):
+  // Crash Landing / Tower Control style
   "tower-control": `
 You are Tower Control, an urgent but composed air traffic controller guiding players through *Crash Landing*, an escape room aboard a failing airplane. The pilot has ejected. Players must solve puzzles to regain autopilot and land safely.
 
@@ -180,7 +179,7 @@ Reminders:
 `
 };
 
-// ===== 2) Common guardrails (appended to every room) =====
+// ===== 2) Common guardrails =====
 const COMMON_RULES = `
 - Give stepwise hints. Do NOT reveal final codes/solutions unless the guest explicitly asks for a "full solution".
 - If the policy or price isn’t in context, say so and offer booking/contact options.
@@ -206,10 +205,8 @@ await pool.query(`
   ALTER TABLE IF EXISTS docs   ADD COLUMN IF NOT EXISTS room_slug TEXT;
   ALTER TABLE IF EXISTS chunks ADD COLUMN IF NOT EXISTS room_slug TEXT;
 `);
-await pool.query(`
-  UPDATE docs   SET room_slug = COALESCE(room_slug, 'global');
-  UPDATE chunks SET room_slug = COALESCE(room_slug, 'global');
-`);
+await pool.query(`UPDATE docs   SET room_slug = COALESCE(room_slug, 'global');`);
+await pool.query(`UPDATE chunks SET room_slug = COALESCE(room_slug, 'global');`);
 
 // ===== 4) CORS + Referer gating =====
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
@@ -246,7 +243,6 @@ app.post('/api/chat', async (req, res) => {
   try {
     if (!allowedByOriginOrReferer(req)) return res.status(403).send('Forbidden');
 
-    // Payload (room is IMPORTANT)
     const { message, session_id = 'anon', room = 'global' } = req.body || {};
     if (!message) return res.status(400).send('Missing message');
 
@@ -259,14 +255,14 @@ app.post('/api/chat', async (req, res) => {
     // Embed query
     const [qVec] = await embedTexts([message]);
 
-    // Retrieve top-K context for the given room + global
+    // Retrieve top-K context (room + global)
     const roomSlug = (room || 'global').toLowerCase();
     const { rows: ctxRows } = await pool.query(
       `SELECT content
          FROM chunks
         WHERE room_slug = $2
            OR room_slug = 'global'
-        ORDER BY embedding <=> $1
+        ORDER BY embedding <=> $1::vector
         LIMIT 6`,
       [qVec, roomSlug]
     );
@@ -326,7 +322,7 @@ ${context}
     );
 
   } catch (e) {
-    console.error(e);
+    console.error('CHAT ERROR:', e?.message, e?.stack);
     if (!res.headersSent) res.status(500).send('Server error');
   }
 });
@@ -339,7 +335,6 @@ app.post('/api/ingest', async (req, res) => {
   const { source = 'manual', url = null, title = null, text, room_slug = 'global' } = req.body || {};
   if (!text || text.length < 20) return res.status(400).send('text too short');
 
-  // Chunk + embed
   const { chunk } = await import('./src/chunking.js');
   const chunks = chunk(text);
   const vecs = await embedTexts(chunks); // Float32Array[3072]
@@ -367,6 +362,24 @@ app.post('/api/ingest', async (req, res) => {
   res.json({ docId, chunks: chunks.length, room_slug: room_slug.toLowerCase() });
 });
 
-// ===== 8) Start server =====
+// ===== 8) SELFTEST (optional) =====
+app.get('/selftest', async (_req, res) => {
+  try {
+    const [vec] = await embedTexts(['hello from exithis']);
+    const { rows } = await pool.query(
+      `SELECT id, LEFT(content,100) AS snippet
+         FROM chunks
+        ORDER BY embedding <=> $1::vector
+        LIMIT 3`,
+      [vec]
+    );
+    res.json({ ok: true, results: rows });
+  } catch (e) {
+    console.error('SELFTEST ERROR:', e?.message, e?.stack);
+    res.status(500).json({ ok: false, error: e?.message });
+  }
+});
+
+// ===== 9) Start server =====
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log('Exithis PG backend on :' + port));
