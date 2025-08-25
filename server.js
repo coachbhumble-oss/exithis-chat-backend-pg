@@ -1,4 +1,16 @@
-// ===== Room-specific instructions (fill these with your Custom GPT instructions) =====
+// server.js — Exithis PG backend (room-aware, pgvector, CORS+referer gate)
+
+import 'dotenv/config';
+import express from 'express';
+import cors from 'cors';
+import { OpenAI } from 'openai';
+import { Pool } from 'pg';
+import { embedTexts } from './src/embeddings.js';
+import { ensureDb } from './tools/db_init.js';
+
+// ===== 1) Room-specific instructions =====
+// Fill these with your Custom GPT instructions for each room.
+// Keys MUST match the ROOM_SLUG you send from each Squarespace page.
 const roomPrompts = {
   "global": `
 You are the Exithis Assistant.
@@ -6,8 +18,39 @@ Handle general questions (booking, policies, location, safety).
 Be concise, friendly, and reassuring.
 `,
 
-  "chat": `
-You are You are Tower Control, an urgent but composed air traffic controller guiding players through *Crash Landing*, an escape room aboard a failing airplane. The pilot has ejected. Players must solve puzzles to regain autopilot and land safely.
+  "pink-beard": `
+You are the Pink Beard room assistant.
+[PASTE the Pink Beard Custom GPT instructions here.]
+`,
+
+  "assassins-hideout": `
+You are the Assassin’s Hideout room assistant.
+[PASTE the Assassin’s Hideout Custom GPT instructions here.]
+`,
+
+  "spaceship": `
+You are the Spaceship room assistant.
+[PASTE the Spaceship Custom GPT instructions here.]
+`,
+
+  "museum-heist": `
+You are the Museum Heist room assistant.
+[PASTE the Museum Heist Custom GPT instructions here.]
+`,
+
+  "time-warp": `
+You are the Time Warp room assistant.
+[PASTE the Time Warp Custom GPT instructions here.]
+`,
+
+  "ghost-mansion": `
+You are the Ghost Mansion room assistant.
+[PASTE the Ghost Mansion Custom GPT instructions here.]
+`,
+
+  // Example from your “Tower Control” style (rename slug to match your page if needed):
+  "tower-control": `
+You are Tower Control, an urgent but composed air traffic controller guiding players through *Crash Landing*, an escape room aboard a failing airplane. The pilot has ejected. Players must solve puzzles to regain autopilot and land safely.
 
 Use clipped, aviation-style radio speech (e.g., “copy,” “confirm,” “override acknowledged”). Keep all replies under two sentences. Begin with subtle hints; escalate only if players are stuck or request help multiple times. Never provide full solutions without justification, and always frame them as team efforts. Stay in character—do not discuss anything unrelated to the mission.
 
@@ -33,7 +76,7 @@ When players ask if a specific action or input is correct (such as a switch dire
 
 **GREEN LOCK:**
 - First hint: “Copy—check the net stowed directly overhead, locate the green Xbox box.”
-- Second hint: “Check for  marked circles—convert alphabetically to numbers.”
+- Second hint: “Inside are letters marked—convert alphabetically to numbers.”
 - Third hint: confirm **3141**.
 
 **RED LOCK:**
@@ -106,64 +149,43 @@ Reminders:
 - Vary hint phrasing.
 - Maintain urgency but enable completion.
 - Mention aircraft details only if part of puzzle.
-`,
-
-  "assassins-hideout": `
-You are the Assassin’s Hideout room assistant.
-[PASTE the Assassin’s Hideout Custom GPT instructions here.]
-`,
-
-  "spaceship": `
-You are the Spaceship room assistant.
-[PASTE the Spaceship Custom GPT instructions here.]
-`,
-
-  "museum-heist": `
-You are the Museum Heist room assistant.
-[PASTE the Museum Heist Custom GPT instructions here.]
-`,
-
-  "time-warp": `
-You are the Time Warp room assistant.
-[PASTE the Time Warp Custom GPT instructions here.]
-`,
-
-  "ghost-mansion": `
-You are the Ghost Mansion room assistant.
-[PASTE the Ghost Mansion Custom GPT instructions here.]
 `
 };
 
-// Optional: common guardrails appended to every room
+// ===== 2) Common guardrails (appended to every room) =====
 const COMMON_RULES = `
 - Give stepwise hints. Do NOT reveal final codes/solutions unless the guest explicitly asks for a "full solution".
 - If the policy or price isn’t in context, say so and offer booking/contact options.
 - Keep answers short and friendly; avoid spoilers unless asked.
 - If safety is mentioned, prioritize safety guidance first.
 `;
-import 'dotenv/config';
-import express from 'express';
-import cors from 'cors';
-import { OpenAI } from 'openai';
-import { Pool } from 'pg';
-import { embedTexts } from './src/embeddings.js';
-import { ensureDb } from './tools/db_init.js';
 
+// ===== 3) App & DB bootstrap =====
 const app = express();
 app.use(express.json({ limit: '2mb' }));
 
-// DB pool with SSL forced
+// Postgres (Render often needs SSL=true)
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
+
+// Ensure extension/tables/indexes exist
 await ensureDb(pool);
 
-// ---------- CORS (robust) ----------
+// Make sure room_slug columns exist (safe to run every boot)
+await pool.query(`
+  ALTER TABLE IF EXISTS docs   ADD COLUMN IF NOT EXISTS room_slug TEXT;
+  ALTER TABLE IF EXISTS chunks ADD COLUMN IF NOT EXISTS room_slug TEXT;
+`);
+await pool.query(`
+  UPDATE docs   SET room_slug = COALESCE(room_slug, 'global');
+  UPDATE chunks SET room_slug = COALESCE(room_slug, 'global');
+`);
+
+// ===== 4) CORS + Referer gating =====
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean);
+  .split(',').map(s => s.trim()).filter(Boolean);
 
 app.use(cors({
   origin: (origin, cb) => {
@@ -175,10 +197,9 @@ app.use(cors({
   allowedHeaders: ['Content-Type','Authorization'],
   maxAge: 86400
 }));
-app.use((req, res, next) => { res.setHeader('Vary','Origin'); next(); });
+app.use((req, res, next) => { res.setHeader('Vary', 'Origin'); next(); });
 app.options('*', cors());
 
-// ---------- Gate by Referer OR Origin ----------
 const refererRe = new RegExp(process.env.REFERER_REGEX || '^$', 'i');
 function allowedByOriginOrReferer(req) {
   const referer = req.get('referer') || '';
@@ -188,45 +209,48 @@ function allowedByOriginOrReferer(req) {
   return refererOk || originOk;
 }
 
-// Optional: root health routes
-app.get('/', (req, res) => res.type('text/plain').send('Exithis API: OK'));
-app.get('/healthz', (req, res) => res.json({ ok: true }));
+// ===== 5) Health routes =====
+app.get('/', (_req, res) => res.type('text/plain').send('Exithis API: OK'));
+app.get('/healthz', (_req, res) => res.json({ ok: true }));
 
-// --- CHAT endpoint ---
+// ===== 6) CHAT — room-aware, pgvector retrieval, streaming =====
 app.post('/api/chat', async (req, res) => {
   try {
     if (!allowedByOriginOrReferer(req)) return res.status(403).send('Forbidden');
 
-    const { message, session_id = 'anon' } = req.body || {};
+    // Payload (room is IMPORTANT)
+    const { message, session_id = 'anon', room = 'global' } = req.body || {};
     if (!message) return res.status(400).send('Missing message');
 
+    // Log user turn
     await pool.query(
       'INSERT INTO chats (session_id, role, content, created_at) VALUES ($1,$2,$3,$4)',
       [session_id, 'user', message, Date.now()]
     );
 
+    // Embed query
     const [qVec] = await embedTexts([message]);
 
-    const { rows: allChunks } = await pool.query('SELECT content, embedding FROM chunks');
-    const scored = allChunks.map(r => ({
-      content: r.content,
-      score: cosine(qVec, fromBytea(r.embedding))
-    }));
-    scored.sort((a,b) => b.score - a.score);
-    const top = scored.slice(0, 6);
-    const context = top.map(t => `• ${t.content}`).join('\n');
+    // Retrieve top-K context for the given room + global
+    const roomSlug = (room || 'global').toLowerCase();
+    const { rows: ctxRows } = await pool.query(
+      `SELECT content
+         FROM chunks
+        WHERE room_slug = $2
+           OR room_slug = 'global'
+        ORDER BY embedding <=> $1
+        LIMIT 6`,
+      [qVec, roomSlug]
+    );
+    const context = ctxRows.map(r => `• ${r.content}`).join('\n');
 
-    const system = // room comes from the frontend body: { room: 'pink-beard' } etc.
-const roomSlug = (room || 'global').toLowerCase();
-const baseInstructions = (roomPrompts[roomSlug] || roomPrompts['global']).trim();
+    // Build system prompt
+    const baseInstructions = (roomPrompts[roomSlug] || roomPrompts['global']).trim();
+    const roomTitle = roomSlug === 'global'
+      ? 'Exithis'
+      : roomSlug.split('-').map(s => s.charAt(0).toUpperCase() + s.slice(1)).join(' ');
 
-// Cosmetic title like "Pink Beard" from "pink-beard"
-const roomTitle = roomSlug === 'global'
-  ? 'Exithis'
-  : roomSlug.split('-').map(s => s.charAt(0).toUpperCase() + s.slice(1)).join(' ');
-
-// Final system prompt sent to the model
-const system = `
+    const system = `
 ${baseInstructions}
 
 ${COMMON_RULES}
@@ -239,22 +263,21 @@ When giving hints, start gentle and escalate gradually.
 Context:
 ${context}
 `.trim();
-Context:
-${context}`;
 
+    // Short history
     const { rows: hist } = await pool.query(
       'SELECT role, content FROM chats WHERE session_id=$1 ORDER BY id DESC LIMIT 10',
       [session_id]
     );
     const history = hist.reverse();
-
     const messages = [{ role: 'system', content: system }, ...history, { role: 'user', content: message }];
 
+    // OpenAI (stream)
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const stream = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
       messages,
-      temperature: 0.5,
+      temperature: 0.3,
       stream: true
     });
 
@@ -268,6 +291,7 @@ ${context}`;
     }
     res.end();
 
+    // Log assistant turn
     await pool.query(
       'INSERT INTO chats (session_id, role, content, created_at) VALUES ($1,$2,$3,$4)',
       [session_id, 'assistant', full, Date.now()]
@@ -279,52 +303,42 @@ ${context}`;
   }
 });
 
-// --- INGEST endpoint ---
+// ===== 7) INGEST — add/update docs (supports room_slug) =====
 app.post('/api/ingest', async (req, res) => {
   const auth = req.get('authorization') || '';
   if (!auth.startsWith('Bearer ')) return res.status(401).send('Unauthorized');
 
-  const { source = 'manual', url = null, title = null, text } = req.body || {};
+  const { source = 'manual', url = null, title = null, text, room_slug = 'global' } = req.body || {};
   if (!text || text.length < 20) return res.status(400).send('text too short');
 
+  // Chunk + embed
   const { chunk } = await import('./src/chunking.js');
   const chunks = chunk(text);
-  const vecs = await embedTexts(chunks);
+  const vecs = await embedTexts(chunks); // Float32Array[3072]
 
+  // Insert doc
   const { rows: docRows } = await pool.query(
-    'INSERT INTO docs (source, url, title, text, updated_at) VALUES ($1,$2,$3,$4,$5) RETURNING id',
-    [source, url, title, text, Date.now()]
+    'INSERT INTO docs (source, url, title, text, updated_at, room_slug) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id',
+    [source, url, title, text, Date.now(), room_slug.toLowerCase()]
   );
   const docId = docRows[0].id;
 
-  const qs = [];
+  // Insert chunks
+  const values = [];
   const params = [];
   let p = 1;
-  for (let i=0;i<chunks.length;i++) {
-    qs.push(`($${p++}, $${p++}, $${p++}, $${p++})`);
-    params.push(docId, i, chunks[i], toBytea(vecs[i]));
+  for (let i = 0; i < chunks.length; i++) {
+    values.push(`($${p++}, $${p++}, $${p++}, $${p++}, $${p++})`);
+    params.push(docId, i, chunks[i], vecs[i], room_slug.toLowerCase());
   }
   await pool.query(
-    `INSERT INTO chunks (doc_id, chunk_index, content, embedding) VALUES ${qs.join(',')}`,
+    `INSERT INTO chunks (doc_id, chunk_index, content, embedding, room_slug) VALUES ${values.join(',')}`,
     params
   );
 
-  res.json({ docId, chunks: chunks.length });
+  res.json({ docId, chunks: chunks.length, room_slug: room_slug.toLowerCase() });
 });
 
-// ---- Local helpers ----
-function cosine(a, b) {
-  let dot=0, na=0, nb=0;
-  for (let i=0;i<a.length;i++){ dot+=a[i]*b[i]; na+=a[i]*a[i]; nb+=b[i]*b[i]; }
-  return dot / (Math.sqrt(na)*Math.sqrt(nb) + 1e-8);
-}
-function fromBytea(buf) {
-  const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
-  return new Float32Array(ab);
-}
-function toBytea(f32) {
-  return Buffer.from(f32.buffer, f32.byteOffset, f32.byteLength);
-}
-
+// ===== 8) Start server =====
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log('Exithis PG backend (corsfix) on :' + port));
+app.listen(port, () => console.log('Exithis PG backend on :' + port));
