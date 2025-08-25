@@ -1,4 +1,4 @@
-// server.js — Exithis PG backend (room-aware, pgvector, CORS+referer gate)
+// server.js — Exithis PG backend (room-aware, pgvector-if-available, CORS+referer)
 
 import 'dotenv/config';
 import express from 'express';
@@ -6,10 +6,8 @@ import cors from 'cors';
 import { OpenAI } from 'openai';
 import { Pool } from 'pg';
 import { embedTexts } from './src/embeddings.js';
-import { ensureDb } from './tools/db_init.js';
 
-// ===== 1) Room-specific instructions =====
-// Keys MUST match the ROOM_SLUG you send from each Squarespace page.
+// ========== 1) Room-specific instructions ==========
 const roomPrompts = {
   "global": `
 You are the Exithis Assistant.
@@ -179,7 +177,7 @@ Reminders:
 `
 };
 
-// ===== 2) Common guardrails =====
+// ========== 2) Common rules appended to all rooms ==========
 const COMMON_RULES = `
 - Give stepwise hints. Do NOT reveal final codes/solutions unless the guest explicitly asks for a "full solution".
 - If the policy or price isn’t in context, say so and offer booking/contact options.
@@ -187,28 +185,78 @@ const COMMON_RULES = `
 - If safety is mentioned, prioritize safety guidance first.
 `;
 
-// ===== 3) App & DB bootstrap =====
+// ========== 3) App & DB bootstrap ==========
 const app = express();
 app.use(express.json({ limit: '2mb' }));
 
-// Postgres (Render often needs SSL=true)
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-// Ensure extension/tables/indexes exist
-await ensureDb(pool);
+// Try to enable pgvector. If not possible, fall back to BYTEA mode.
+let USE_PGVECTOR = true;
+try {
+  await pool.query('CREATE EXTENSION IF NOT EXISTS vector');
+  // create tables for pgvector
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS docs (
+      id          BIGSERIAL PRIMARY KEY,
+      source      TEXT,
+      url         TEXT,
+      title       TEXT,
+      text        TEXT,
+      updated_at  BIGINT,
+      room_slug   TEXT
+    );
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS chunks (
+      id           BIGSERIAL PRIMARY KEY,
+      doc_id       BIGINT REFERENCES docs(id) ON DELETE CASCADE,
+      chunk_index  INT NOT NULL,
+      content      TEXT NOT NULL,
+      embedding    VECTOR(3072) NOT NULL,
+      room_slug    TEXT
+    );
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS chunks_room_idx ON chunks(room_slug);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS chunks_embedding_idx ON chunks USING ivfflat (embedding vector_l2_ops) WITH (lists = 100);`);
+} catch (e) {
+  console.warn('pgvector not available, falling back to BYTEA embeddings:', e.message);
+  USE_PGVECTOR = false;
+  // portable schema with BYTEA embeddings
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS docs (
+      id          BIGSERIAL PRIMARY KEY,
+      source      TEXT,
+      url         TEXT,
+      title       TEXT,
+      text        TEXT,
+      updated_at  BIGINT,
+      room_slug   TEXT
+    );
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS chunks (
+      id           BIGSERIAL PRIMARY KEY,
+      doc_id       BIGINT REFERENCES docs(id) ON DELETE CASCADE,
+      chunk_index  INT NOT NULL,
+      content      TEXT NOT NULL,
+      embedding    BYTEA NOT NULL,
+      room_slug    TEXT
+    );
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS chunks_room_idx ON chunks(room_slug);`);
+}
 
-// Make sure room_slug columns exist (safe to run every boot)
-await pool.query(`
-  ALTER TABLE IF EXISTS docs   ADD COLUMN IF NOT EXISTS room_slug TEXT;
-  ALTER TABLE IF EXISTS chunks ADD COLUMN IF NOT EXISTS room_slug TEXT;
-`);
+// normalize room slug defaults
+await pool.query(`ALTER TABLE IF EXISTS docs   ADD COLUMN IF NOT EXISTS room_slug TEXT;`);
+await pool.query(`ALTER TABLE IF EXISTS chunks ADD COLUMN IF NOT EXISTS room_slug TEXT;`);
 await pool.query(`UPDATE docs   SET room_slug = COALESCE(room_slug, 'global');`);
 await pool.query(`UPDATE chunks SET room_slug = COALESCE(room_slug, 'global');`);
 
-// ===== 4) CORS + Referer gating =====
+// ========== 4) CORS + Referer gate ==========
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
   .split(',').map(s => s.trim()).filter(Boolean);
 
@@ -234,11 +282,32 @@ function allowedByOriginOrReferer(req) {
   return refererOk || originOk;
 }
 
-// ===== 5) Health routes =====
+// ========== 5) Health ==========
 app.get('/', (_req, res) => res.type('text/plain').send('Exithis API: OK'));
 app.get('/healthz', (_req, res) => res.json({ ok: true }));
 
-// ===== 6) CHAT — room-aware, pgvector retrieval, streaming =====
+// ========== 6) Helpers ==========
+function vecToPgvectorString(f32) {
+  // '[v1,v2,...]' text form accepted by pgvector
+  return '[' + Array.from(f32, x => Number.isFinite(x) ? x : 0).join(',') + ']';
+}
+function toBytea(f32) {
+  return Buffer.from(f32.buffer, f32.byteOffset, f32.byteLength);
+}
+function fromBytea(buf) {
+  const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+  return new Float32Array(ab);
+}
+function cosine(a, b) {
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) {
+    const ai = a[i], bi = b[i];
+    dot += ai * bi; na += ai * ai; nb += bi * bi;
+  }
+  return dot / (Math.sqrt(na) * Math.sqrt(nb) + 1e-8);
+}
+
+// ========== 7) CHAT ==========
 app.post('/api/chat', async (req, res) => {
   try {
     if (!allowedByOriginOrReferer(req)) return res.status(403).send('Forbidden');
@@ -246,29 +315,47 @@ app.post('/api/chat', async (req, res) => {
     const { message, session_id = 'anon', room = 'global' } = req.body || {};
     if (!message) return res.status(400).send('Missing message');
 
-    // Log user turn
+    // log user turn
     await pool.query(
       'INSERT INTO chats (session_id, role, content, created_at) VALUES ($1,$2,$3,$4)',
       [session_id, 'user', message, Date.now()]
     );
 
-    // Embed query
+    // embed query
     const [qVec] = await embedTexts([message]);
 
-    // Retrieve top-K context (room + global)
+    // retrieve context
     const roomSlug = (room || 'global').toLowerCase();
-    const { rows: ctxRows } = await pool.query(
-      `SELECT content
-         FROM chunks
-        WHERE room_slug = $2
-           OR room_slug = 'global'
-        ORDER BY embedding <=> $1::vector
-        LIMIT 6`,
-      [qVec, roomSlug]
-    );
-    const context = ctxRows.map(r => `• ${r.content}`).join('\n');
+    let context = '';
 
-    // Build system prompt
+    if (USE_PGVECTOR) {
+      const params = [vecToPgvectorString(qVec), roomSlug];
+      const { rows: ctxRows } = await pool.query(
+        `SELECT content
+           FROM chunks
+          WHERE room_slug = $2 OR room_slug = 'global'
+          ORDER BY embedding <=> $1::vector
+          LIMIT 6`,
+        params
+      );
+      context = ctxRows.map(r => `• ${r.content}`).join('\n');
+    } else {
+      // Fallback: cosine in Node over latest 500 chunks in the room+global
+      const { rows } = await pool.query(
+        `SELECT content, embedding FROM chunks
+          WHERE room_slug = $1 OR room_slug = 'global'
+          ORDER BY id DESC
+          LIMIT 500`,
+        [roomSlug]
+      );
+      const scored = rows.map(r => ({
+        content: r.content,
+        score: cosine(qVec, fromBytea(r.embedding))
+      })).sort((a,b) => b.score - a.score).slice(0,6);
+      context = scored.map(s => `• ${s.content}`).join('\n');
+    }
+
+    // system prompt
     const baseInstructions = (roomPrompts[roomSlug] || roomPrompts['global']).trim();
     const roomTitle = roomSlug === 'global'
       ? 'Exithis'
@@ -288,7 +375,7 @@ Context:
 ${context}
 `.trim();
 
-    // Short history
+    // short history
     const { rows: hist } = await pool.query(
       'SELECT role, content FROM chats WHERE session_id=$1 ORDER BY id DESC LIMIT 10',
       [session_id]
@@ -296,7 +383,7 @@ ${context}
     const history = hist.reverse();
     const messages = [{ role: 'system', content: system }, ...history, { role: 'user', content: message }];
 
-    // OpenAI (stream)
+    // OpenAI stream
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const stream = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
@@ -315,7 +402,7 @@ ${context}
     }
     res.end();
 
-    // Log assistant turn
+    // log assistant turn
     await pool.query(
       'INSERT INTO chats (session_id, role, content, created_at) VALUES ($1,$2,$3,$4)',
       [session_id, 'assistant', full, Date.now()]
@@ -327,7 +414,7 @@ ${context}
   }
 });
 
-// ===== 7) INGEST — add/update docs (supports room_slug) =====
+// ========== 8) INGEST ==========
 app.post('/api/ingest', async (req, res) => {
   const auth = req.get('authorization') || '';
   if (!auth.startsWith('Bearer ')) return res.status(401).send('Unauthorized');
@@ -335,51 +422,71 @@ app.post('/api/ingest', async (req, res) => {
   const { source = 'manual', url = null, title = null, text, room_slug = 'global' } = req.body || {};
   if (!text || text.length < 20) return res.status(400).send('text too short');
 
+  // chunk + embed
   const { chunk } = await import('./src/chunking.js');
   const chunks = chunk(text);
   const vecs = await embedTexts(chunks); // Float32Array[3072]
 
-  // Insert doc
+  // insert doc
   const { rows: docRows } = await pool.query(
     'INSERT INTO docs (source, url, title, text, updated_at, room_slug) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id',
     [source, url, title, text, Date.now(), room_slug.toLowerCase()]
   );
   const docId = docRows[0].id;
 
-  // Insert chunks
+  // insert chunks
   const values = [];
   const params = [];
   let p = 1;
   for (let i = 0; i < chunks.length; i++) {
-    values.push(`($${p++}, $${p++}, $${p++}, $${p++}, $${p++})`);
-    params.push(docId, i, chunks[i], vecs[i], room_slug.toLowerCase());
+    if (USE_PGVECTOR) {
+      values.push(`($${p++}, $${p++}, $${p++}, $${p++}::vector, $${p++})`);
+      params.push(docId, i, chunks[i], vecToPgvectorString(vecs[i]), room_slug.toLowerCase());
+    } else {
+      values.push(`($${p++}, $${p++}, $${p++}, $${p++}, $${p++})`);
+      params.push(docId, i, chunks[i], toBytea(vecs[i]), room_slug.toLowerCase());
+    }
   }
   await pool.query(
     `INSERT INTO chunks (doc_id, chunk_index, content, embedding, room_slug) VALUES ${values.join(',')}`,
     params
   );
 
-  res.json({ docId, chunks: chunks.length, room_slug: room_slug.toLowerCase() });
+  res.json({ docId, chunks: chunks.length, room_slug: room_slug.toLowerCase(), mode: USE_PGVECTOR ? 'pgvector' : 'bytea' });
 });
 
-// ===== 8) SELFTEST (optional) =====
+// ========== 9) SELFTEST ==========
 app.get('/selftest', async (_req, res) => {
   try {
     const [vec] = await embedTexts(['hello from exithis']);
-    const { rows } = await pool.query(
-      `SELECT id, LEFT(content,100) AS snippet
-         FROM chunks
-        ORDER BY embedding <=> $1::vector
-        LIMIT 3`,
-      [vec]
-    );
-    res.json({ ok: true, results: rows });
+    if (USE_PGVECTOR) {
+      const { rows } = await pool.query(
+        `SELECT id, LEFT(content,80) AS snippet
+           FROM chunks
+          ORDER BY embedding <=> $1::vector
+          LIMIT 3`,
+        [vecToPgvectorString(vec)]
+      );
+      res.json({ ok: true, mode: 'pgvector', results: rows });
+    } else {
+      const { rows } = await pool.query(
+        `SELECT id, content, embedding
+           FROM chunks
+          ORDER BY id DESC
+          LIMIT 100`
+      );
+      const scored = rows.map(r => ({
+        id: r.id, snippet: r.content?.slice(0,80) || '',
+        score: cosine(vec, fromBytea(r.embedding))
+      })).sort((a,b)=>b.score-a.score).slice(0,3);
+      res.json({ ok: true, mode: 'bytea', results: scored });
+    }
   } catch (e) {
     console.error('SELFTEST ERROR:', e?.message, e?.stack);
     res.status(500).json({ ok: false, error: e?.message });
   }
 });
 
-// ===== 9) Start server =====
+// ========== 10) Start server ==========
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log('Exithis PG backend on :' + port));
+app.listen(port, () => console.log(`Exithis PG backend (${USE_PGVECTOR ? 'pgvector' : 'bytea-fallback'}) on :${port}`));
