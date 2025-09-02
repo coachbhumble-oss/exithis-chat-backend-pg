@@ -62,10 +62,10 @@ Locks & codes:
 - BLACK: equation under movable skid → 1249.
 
 Cats & Dogs puzzle:
-- Goal: derive a keypad code using animal tags + wall feeding/schedule poster.
+- Goal: derive a switches code using animal tags +  Animal on Board Paper.
 - Tags: names/icons like Luna, Simba, Bella, Coco, Max, Daisy, Charlie, Lucy. Each maps to a left/right switch validation and to poster schedule order.
-- Poster: shows feeding times/order for animals; use to derive final digit sequence.
-- Method: (1) Collect all animal tags, (2) locate poster, (3) align tags to rows, (4) read feeding order, (5) translate order to digits using legend, (6) enter digits on side keypad.
+- nametags: shows a direction of an arrow for each animal; use to derive final direction sequence.
+- Method: (1) Collect all animal tags, (2) locate paper, (3) align nametag arrows to name and position on the paper, (4) read each nametag to determine left or right, (5) translate order of the switches using legend, (6) flip the switches left of right.
 - Parallelism: can be solved alongside Initially Colored Locks (ICL). ICL may reveal more tags, but C&D can start with any available tags.
 - Validation (internal truth table): Luna → Right, Simba → Left, Bella → Left, Coco → Right, Max → Right, Daisy → Right, Charlie → Left, Lucy → Right. Any single-animal direction check = confirm/deny in clipped radio style.
 
