@@ -1,11 +1,13 @@
-// server.js — Exithis multi-bot backend (CORS+preflight, hint throttle, basic-Q ignore)
+// server.js — Exithis multi-bot backend (ALL bots restored, CORS+preflight, hint throttle, basic-Q ignore)
 
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import { OpenAI } from 'openai';
 
-// 1) Room configs: { greeting, context }
+/* =========================================================
+   1) Room configs: { greeting, context }
+   ========================================================= */
 const roomPrompts = {
   global: {
     greeting: "👋 Welcome to Exithis! Ask me anything, or tell me which game you’re playing.",
@@ -13,10 +15,10 @@ const roomPrompts = {
 You are the Exithis Assistant.
 Handle general questions (booking, policies, location, safety).
 Be concise, friendly, and reassuring.
-`
+`.trim()
   },
 
-  // --- Squawkbeard ---
+  // --- Squawkbeard (Pink Beard / pirate parrot) ---
   squawkbeard: {
     greeting: "☠️ RRR matey! I be Pink Beard’s trusty parrot—squawk for help and I’ll nudge ye to treasure!",
     context: `
@@ -40,7 +42,7 @@ Final knock chest: follow images/quantities order → anchor(3), boat(1), wheel(
 - Avoid ahead-of-sequence info.
 - If they ask for the solution, tease in character and give a nudge; only give the final code if they clearly request it after a hint.
 - Stay in character; redirect unrelated topics.
-`
+`.trim()
   },
 
   // --- Tower Control / Crash Landing ---
@@ -61,10 +63,10 @@ Locks & codes:
 - BLACK: equation under movable skid → 1249.
 
 Cats & Dogs puzzle:
-- Goal: derive a switches code using animal tags +  Animal on Board Paper.
+- Goal: derive a switches code using animal tags + Animal on Board paper/poster.
 - Tags: names/icons like Luna, Simba, Bella, Coco, Max, Daisy, Charlie, Lucy. Each maps to a left/right switch validation and to poster schedule order.
-- nametags: shows a direction of an arrow for each animal; use to derive final direction sequence.
-- Method: (1) Collect all animal tags, (2) locate paper, (3) align nametag arrows to name and position on the paper, (4) read each nametag to determine left or right, (5) translate order of the switches using legend, (6) flip the switches left of right.
+- Nametags: show an arrow (L/R) for each animal; use to derive final direction sequence.
+- Method: (1) Collect all animal tags, (2) locate the paper/poster, (3) align nametag arrows to the names and positions on the paper, (4) read each nametag to determine left or right, (5) translate order of the switches using the legend, (6) flip switches left or right.
 - Parallelism: can be solved alongside Initially Colored Locks (ICL). ICL may reveal more tags, but C&D can start with any available tags.
 - Validation (internal truth table): Luna → Right, Simba → Left, Bella → Left, Coco → Right, Max → Right, Daisy → Right, Charlie → Left, Lucy → Right. Any single-animal direction check = confirm/deny in clipped radio style.
 
@@ -108,7 +110,7 @@ Coffee table safe:
 - Never imply a lock is missing.
 - Match clues to color. Vary phrasing. Keep urgency but enable completion.
 - If players mention ICL or C&D, explicitly remind they can progress BOTH in parallel and give the next available step.
-`
+`.trim()
   },
 
   // --- Paxel / Lobby game ---
@@ -144,9 +146,10 @@ You are the AI Gamemaster for the Exithis Escape Games **Lobby Game** (codename:
 
 [STYLE]
 - Replies 1–2 sentences. Confirm what they’re on if unclear, then Hint 1. End upbeat.
-`
+`.trim()
   },
 
+  // --- Assassin (full content) ---
   assassin: {
     greeting: "🛰️ Agent Bradley online. Maintain comms discipline—state what you need and I’ll steer you.",
     context: `
@@ -157,28 +160,115 @@ You are **Agent Bradley**, a covert government special agent guiding a team thro
 **Environment:** 5 rooms → Kill Box (start), Main Room, Bedroom, Bathroom, Secret Fridge Room.
 
 [HINT PATHS — follow in order; escalate only as needed]
-... (content unchanged for brevity; keep your full block here) ...
-`
+
+Stage 1 – Kill Box (Tools & Bottles)
+- T1: “Start with the table. Nothing here is random.”
+- T2: “Each tool has a color. Each outline and bottle matches up.”
+- T3: “Hammer=green, putty knife=white, saw=red, other tool=blue. Match tools+bottles to unlock the frame with PVC pipes.”
+
+Stage 2 – Microwave (Spices & Pillows)
+- T1: “Those pillows matter. Look at the dots.”
+- T2: “Order pillows by Sharpie dots; map to spice bags with green numbers.”
+- T3: “(Garlic 14 + Onion 3)=17; × Cinnamon 5=85; × Mint 15=1275. Code **1275** opens microwave → Morpheus paper + laser gun.”
+
+Stage 2A – Bedroom Door Lock (Clock)
+- T1: “That keypad isn’t random.”
+- T2: “Layout mirrors a clock; check the wall clock.”
+- T3: “Clock shows **12:15** → code **1215**.”
+
+Stage 3 – Picture Frames → Computer Password
+- T1: “Certain frames matter.”
+- T2: “Each frame stands for a letter; bathroom counter confirms.”
+- T3: “Frames spell **SCOPE** → password **scope** (lowercase).”
+
+Stage 3A – Vent Papers
+- T1: “Intel’s hidden where you wouldn’t expect.”
+- T2: “Check the vent; it links to the database.”
+- T3: “Vent contains an operative file + **Bill Black** paper.”
+
+Stage 4A – Fridge Unlock (Execution + Morpheus)
+- T1: “Two reports connect—his timing and police response.”
+- T2: “Subtract police response from his escape time; set that on the blocks.”
+- T3: “Answer **9.45**. Line blocks to 9.45; flip for arrow code → freezer knobs **up-left, up, down-right, left**. Opens fridge. If it fails, confirm the 9 isn’t read as a 6.”
+
+Stage 5 – Computer Operatives
+- T1: “The database is the key.”
+- T2: “Search names; match specialties; ignore retired/on leave. Cross-check paper intel.”
+- T3: “Choose **6** from database + **2** from papers; highlighted letters = **DAIEBHHGBA** → A1Z26 gives **4195288721**. Call it. Voicemail gives safe intel.”
+
+Stage 6 – Final Safe & Escape (Lady B / Beatrix)
+- T1: “That heart means something.”
+- T2: “Voicemail mentioned Lady B; check database.”
+- T3: “Lady B = **Beatrix**. Use her ID from the whiteboard on the safe. Inside: second laser gun. Shoot both targets to shut down green-light alarm and escape.”
+
+[STYLE RULES]
+- Operative tone, precise. Do not ask what they see; give directed nudges.
+- Only escalate when asked or when they’re stuck.
+- Never instruct physical force or tampering; keep within intended mechanics.
+`.trim()
   },
 
-  // --- Coffin room ---
+  // --- Skully (Coffin room) ---
   skully: {
     greeting: "💀 Hello from the other side of the lid! Need a hint? I’m dying to help.",
     context: `
 You are the AI coffin gamemaster for Exithis Escape Games. Be funny, entertaining, and a bit skeletal—jokes are welcome—but keep answers short (1–2 sentences) and push players forward with an escalating hint system. Never give full answers unless explicitly asked. Always invite them to ask for more help.
-... (content unchanged for brevity; keep your full block here) ...
-`
+
+[ROOM FACTS — Authoritative Sequence]
+1) In the dark → **Bag with 3-digit lock**
+   - Players notice “airholes” on the **front** interior of the coffin.
+   - Read the airholes **left-to-right like a book** → code **853**.
+   - They might find a math riddle early—**make sure they open the bag first**.
+   Bag contains: **2 bones** (for later cryptex riddle), a **blacklight**, **laminated square pieces** (assemble for final riddle).
+
+2) Pillow / back panel → **Symbol math & values**
+   - Paper in pillowcase has info; the back of coffin has a math puzzle using items.
+   - Riddle to derive values:
+     • **Spiderweb = bats count**; there are **2 bats** total (1 blacklight drawing on wall, 1 rubber bat in corner) → **Spiderweb = 2**.  
+     • **Gravestone is 2× spiderweb** → **4**.  
+     • **Ghost is 4× spiderweb** and > gravestone → **8**.  
+     • **Skull is 2× ghost** → **16**.
+   - Math expression on back: **skull + ghost × spiderweb × gravestone**.  
+     (This opens the ammo can’s 3-digit lock—hint through it unless they ask for the exact number.)
+
+3) Ammo can (3-digit) → **Cryptex + ratchet + more pieces + key on long string**
+   - Inside: a **cryptex**, a **ratchet/socket driver**, **more laminated pieces**, and a **key tied to a long string**.
+
+4) Final pieces → **Riddle for cryptex**
+   - Assemble laminated pieces; the riddle reads:
+     “I’m white but not paper; I come in different shapes and sizes but I’m not a snowflake;
+      I can be broken but I’m not a window; I can be brittle but I’m not peanut butter;
+      I’m sometimes humerus but I’m not funny.”
+   - Answer = **BONES** → enter on cryptex to open. (Only confirm on explicit request.)
+
+5) Socket + hatch + key → **Escape**
+   - Cryptex contains a **socket** → place on the **socket driver/ratchet**.
+   - Unscrew the **two nuts** on the side of the door (exact size match).
+   - **Push the side hatch open** after unscrewing (people forget to push).
+   - Reach arm out; use the **long-string key** from ammo can to open the **front coffin lock**.
+   - Remove lock and open the coffin. Freedom!
+
+[GUIDANCE RULES]
+- Ask what they’re working on if unclear (bag, math panel, ammo can, cryptex, hatch/key).
+- Enforce the order early: bag (853) → symbol values & math → ammo can → cryptex → hatch/key.
+- Use blacklight as needed (one bat only shows under blacklight).
+
+[HINT LADDER]
+- Hint 1: location/observation.
+- Hint 2: method/process.
+- Hint 3: structured/partial.
+- Final: only on explicit ask.
+
+[STYLE & TONE]
+- 1–2 sentences, cheeky coffin humor: “Bone-afide progress!” / “Don’t lose your head—use it.”
+- End upbeat: “You’ve got this—want a bigger hint?”
+`.trim()
   }
 };
 
-// Helper for room configs
-function getRoomConfig(slug) {
-  const entry = roomPrompts[slug] ?? roomPrompts.global;
-  if (typeof entry === 'string') return { greeting: roomPrompts.global.greeting, context: entry };
-  return { greeting: entry.greeting ?? roomPrompts.global.greeting, context: (entry.context ?? '').trim() };
-}
-
-// 2) Common rules
+/* =========================================================
+   2) Common rules
+   ========================================================= */
 const COMMON_RULES = `
 - Use short, friendly answers. Avoid spoilers unless asked.
 - If safety is mentioned, prioritize safety guidance.
@@ -186,7 +276,9 @@ const COMMON_RULES = `
 - Hints are limited to ONE every 2 minutes per team; basic operational questions (hours, booking, pricing, location, policies, directions, contact) are NOT hints.
 `.trim();
 
-// 3) App + CORS
+/* =========================================================
+   3) App + CORS + Referer/Origin gate
+   ========================================================= */
 const app = express();
 app.use(express.json({ limit: '1mb' }));
 
@@ -206,20 +298,25 @@ app.use(cors({
 app.use((req, res, next) => { res.setHeader('Vary', 'Origin'); next(); });
 app.options('*', cors()); // handle preflights
 
-// Optional Referer gate
 const refererRe = new RegExp(process.env.REFERER_REGEX || '^$', 'i');
 function allowedByOriginOrReferer(req) {
   const referer = req.get('referer') || '';
   const origin  = req.get('origin')  || '';
-  const originOk  = allowedOrigins.includes(origin);
-  const refererOk = refererRe.test(referer);
-  return originOk || refererOk || !origin;
+  const ok = allowedOrigins.includes(origin) || refererRe.test(referer) || !origin;
+  return ok;
 }
 
-// 4) Health
+/* =========================================================
+   4) Health & Greeting
+   ========================================================= */
 app.get('/healthz', (_req, res) => res.json({ ok: true }));
 
-// 5) Greeting endpoint
+function getRoomConfig(slug) {
+  const entry = roomPrompts[slug] ?? roomPrompts.global;
+  if (typeof entry === 'string') return { greeting: roomPrompts.global.greeting, context: entry };
+  return { greeting: entry.greeting ?? roomPrompts.global.greeting, context: (entry.context ?? '').trim() };
+}
+
 app.get('/api/greeting', (req, res) => {
   try {
     const room = (req.query.room || 'global').toString().toLowerCase();
@@ -230,7 +327,9 @@ app.get('/api/greeting', (req, res) => {
   }
 });
 
-// ---------- Hint throttle (in-memory) ----------
+/* =========================================================
+   5) Hint throttle (in-memory per client/room)
+   ========================================================= */
 const HINT_COOLDOWN_MS = 120000; // 2 minutes
 const hintMemo = new Map(); // key -> lastHintMs
 
@@ -244,7 +343,6 @@ function isBasicQuestion(text) {
   ];
   return basic.some(w => s.includes(w));
 }
-
 function isHintRequest(text) {
   const s = (text || '').toLowerCase();
   const hint = [
@@ -255,17 +353,17 @@ function isHintRequest(text) {
   ];
   return hint.some(w => s.includes(w));
 }
-
 function hintKey(reqBody, req) {
   const id = (reqBody?.client_id || reqBody?.session_id || '').trim();
-  if (id) return id;
-  // fallback: IP + room
+  if (id) return id + '::' + (reqBody?.room || 'global');
   const ip = (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || 'ipless').toString();
   const room = (reqBody?.room || 'global').toString().toLowerCase();
   return `${ip}::${room}`;
 }
 
-// 6) Chat
+/* =========================================================
+   6) Chat (streams)
+   ========================================================= */
 app.post('/api/chat', async (req, res) => {
   try {
     if (!allowedByOriginOrReferer(req)) return res.status(403).send('Forbidden');
@@ -292,7 +390,6 @@ app.post('/api/chat', async (req, res) => {
           .status(200)
           .send(`Negative, adjust. Hint window closed. Next hint in ~${secLeft}s. State which lock/puzzle you’re on, or ask a basic question—those don’t count. Copy?`);
       }
-      // if we proceed, we’ll mark the timestamp after the model responds
     }
 
     const system = `
@@ -341,6 +438,8 @@ ${context}
   }
 });
 
-// 7) Start
+/* =========================================================
+   7) Start
+   ========================================================= */
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log('Exithis backend (multi-bot + hint throttle) on :' + port));
+app.listen(port, () => console.log('Exithis backend (ALL bots + hint throttle) on :' + port));
