@@ -1,4 +1,9 @@
-// server.js — Exithis multi-bot backend (ALL bots restored, CORS+preflight, hint throttle, basic-Q ignore)
+// server.js — Exithis multi-bot backend
+// - ALL bots restored
+// - CORS + preflight, Referer/Origin gate
+// - Hint throttle: ONE hint per reply + ONE hint per 2 minutes
+// - Basic questions do NOT count as hints
+// - Streaming via OpenAI
 
 import 'dotenv/config';
 import express from 'express';
@@ -267,13 +272,15 @@ You are the AI coffin gamemaster for Exithis Escape Games. Be funny, entertainin
 };
 
 /* =========================================================
-   2) Common rules
+   2) Common rules (with strict hint policy)
    ========================================================= */
 const COMMON_RULES = `
 - Use short, friendly answers. Avoid spoilers unless asked.
 - If safety is mentioned, prioritize safety guidance.
-- Reveal multi-step solutions only on explicit request; otherwise escalate hints.
-- Hints are limited to ONE every 2 minutes per team; basic operational questions (hours, booking, pricing, location, policies, directions, contact) are NOT hints.
+- Hints are rate-limited: at most ONE hint unit per response and at most ONE hint every 2 minutes per team.
+- Basic operational questions (hours, booking, pricing, location, policies, directions, contact) are NOT hints and do not consume cooldown.
+- A "hint unit" means: either a Level-1 location nudge OR a Level-2 method clue OR (only if explicitly requested) a Level-3 full solution/confirmation. Never combine multiple hint units in one message.
+- Do not escalate hint level unless the user explicitly asks for more or is clearly stuck after a prior hint.
 `.trim();
 
 /* =========================================================
@@ -309,13 +316,13 @@ function allowedByOriginOrReferer(req) {
 /* =========================================================
    4) Health & Greeting
    ========================================================= */
-app.get('/healthz', (_req, res) => res.json({ ok: true }));
-
 function getRoomConfig(slug) {
   const entry = roomPrompts[slug] ?? roomPrompts.global;
   if (typeof entry === 'string') return { greeting: roomPrompts.global.greeting, context: entry };
   return { greeting: entry.greeting ?? roomPrompts.global.greeting, context: (entry.context ?? '').trim() };
 }
+
+app.get('/healthz', (_req, res) => res.json({ ok: true }));
 
 app.get('/api/greeting', (req, res) => {
   try {
@@ -362,7 +369,7 @@ function hintKey(reqBody, req) {
 }
 
 /* =========================================================
-   6) Chat (streams)
+   6) Chat (streams) — with HINT_MODE lock
    ========================================================= */
 app.post('/api/chat', async (req, res) => {
   try {
@@ -377,25 +384,35 @@ app.post('/api/chat', async (req, res) => {
       ? 'Exithis'
       : roomSlug.split('-').map(s => s.charAt(0).toUpperCase() + s.slice(1)).join(' ');
 
-    // Hint throttle check
+    // ---------- Hint throttle logic ----------
     const wantsHint = isHintRequest(message) && !isBasicQuestion(message);
-    if (wantsHint) {
-      const key = hintKey(req.body, req);
-      const last = hintMemo.get(key) || 0;
-      const now = Date.now();
-      if (now - last < HINT_COOLDOWN_MS) {
-        const secLeft = Math.max(0, Math.ceil((last + HINT_COOLDOWN_MS - now) / 1000));
-        return res
-          .type('text/plain; charset=utf-8')
-          .status(200)
-          .send(`Negative, adjust. Hint window closed. Next hint in ~${secLeft}s. State which lock/puzzle you’re on, or ask a basic question—those don’t count. Copy?`);
-      }
+    const key = hintKey(req.body, req);
+    const last = hintMemo.get(key) || 0;
+    const now = Date.now();
+    const withinCooldown = (now - last) < HINT_COOLDOWN_MS;
+
+    // If they explicitly asked for a hint but we're in cooldown, short-circuit.
+    if (wantsHint && withinCooldown) {
+      const secLeft = Math.max(0, Math.ceil((last + HINT_COOLDOWN_MS - now) / 1000));
+      return res
+        .type('text/plain; charset=utf-8')
+        .status(200)
+        .send(`Negative, adjust. Hint window closed. Next hint in ~${secLeft}s. State which lock/puzzle you’re on, or ask a basic question—those don’t count. Copy?`);
     }
+
+    // HINT_MODE for the model:
+    //  - LOCKED: do not give any new hint content; may clarify or answer basics.
+    //  - ALLOWED: give at most ONE hint unit (L1 or L2). L3 only on explicit ask.
+    const hintMode = withinCooldown ? 'LOCKED' : 'ALLOWED';
 
     const system = `
 You are the assistant for ${roomTitle}.
 
 ${COMMON_RULES}
+
+HINT_MODE: ${hintMode}
+- If HINT_MODE=LOCKED: Do NOT give any new hint content (no methods, no numbers, no orders, no validation). You may ask which lock/puzzle they are on, rephrase their goal, or answer basic/non-hint questions.
+- If HINT_MODE=ALLOWED: Give at most ONE hint unit (L1 or L2). Only give a Level-3 full solution when the user explicitly asks for the answer/confirmation. Never chain multiple hints in one reply.
 
 Use the **Room Context** and your role instructions to answer. Prefer Room Context if there’s a conflict. Keep replies under two sentences unless asked for more.
 
@@ -427,9 +444,9 @@ ${context}
     }
     res.end();
 
-    // Mark hint timestamp only after sending response
-    if (wantsHint) {
-      hintMemo.set(hintKey(req.body, req), Date.now());
+    // If a hint was requested and we weren't locked, start cooldown now.
+    if (wantsHint && !withinCooldown) {
+      hintMemo.set(key, Date.now());
     }
 
   } catch (e) {
@@ -442,4 +459,4 @@ ${context}
    7) Start
    ========================================================= */
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log('Exithis backend (ALL bots + hint throttle) on :' + port));
+app.listen(port, () => console.log('Exithis backend (ALL bots + strict hint throttle) on :' + port));
