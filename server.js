@@ -90,7 +90,7 @@ Wires for Control Room access:
 
 Control Room puzzles:
 - Left: knobs “metal” = 231 and “plastic” = 313 → opens compartment with overlay paper.
-- Center: overlay (from opening metal + plastic puzzle) + airplane diagram (from coffee table safe) → cabin pressures = 4302. code opens manual override 2 access door.
+- Center: this is the override 2 puzzle or also called cabin pressures, overlay (from opening metal + plastic puzzle) + airplane diagram (from coffee table safe) → cabin pressures = 4302. code opens manual override 2 access door.
 - Right: needle gauges set via overlay.
 - Mask meter (final): shapes order square → triangle → octagon → circle → code 5930; reveals 2 keys.
 
