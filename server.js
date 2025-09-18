@@ -76,7 +76,7 @@ Cats & Dogs puzzle:
 - Validation (internal truth table): Luna → Right, Simba → Left, Bella → Left, Coco → Right, Max → Right, Daisy → Right, Charlie → Left, Lucy → Right. Any single-animal direction check = confirm/deny in clipped radio style.
 
 Vents puzzle:
-- 3 total (2 cabin, 1 cargo). Numbers are 70, 160 (cargo), 40. Each vent has 3 small circles where 1 is filled; that mark indicates which touchscreen gauge gets the number. When correct, rear hatch “Pull when lit” opens to the crawl maze.
+- 3 total (2 cabin, 1 cargo). Numbers are 70, 160 (cargo) 40. they find these numbers by sticking their arm in the vent and feeling the engravement of each of the numbers, one in each vent, Each vent has 3 small circles where 1 is filled; that mark indicates which touchscreen gauge gets the number. When correct, rear hatch “Pull when lit” opens to the crawl maze.
 
 Crawl maze:
 - Under rug near rear wall → trash room with “metal” and “plastic” pipes.
@@ -90,7 +90,7 @@ Wires for Control Room access:
 
 Control Room puzzles:
 - Left: knobs “metal” = 231 and “plastic” = 313 → opens compartment with overlay paper.
-- Center: overlay + airplane diagram (from safe) → cabin pressures = 4302. opens override 2 access door.
+- Center: overlay (from opening metal + plastic puzzle) + airplane diagram (from coffee table safe) → cabin pressures = 4302. code opens manual override 2 access door.
 - Right: needle gauges set via overlay.
 - Mask meter (final): shapes order square → triangle → octagon → circle → code 5930; reveals 2 keys.
 
