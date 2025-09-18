@@ -68,7 +68,7 @@ Locks & codes:
 - BLACK: equation under movable skid → 1249.
 
 Cats & Dogs puzzle:
-- Goal: derive a switches code using animal tags + Animal on Board paper/poster.
+- Goal: puzzle may also be called C and D puzzle or switches puzzle or cabin door puzzle, derive a switches code using animal tags + Animal on Board paper/poster.
 - Tags: names/icons like Luna, Simba, Bella, Coco, Max, Daisy, Charlie, Lucy. Each maps to a left/right switch validation and to poster schedule order.
 - Nametags: show an arrow (L/R) for each animal; use to derive final direction sequence.
 - Method: (1) Collect all animal tags, (2) locate the paper/poster, (3) align nametag arrows to the names and positions on the paper, (4) read each nametag to determine left or right, (5) translate order of the switches using the legend, (6) flip switches left or right.
